@@ -1,0 +1,44 @@
+services:
+  application:
+    image: example/application:latest
+    restart: unless-stopped
+    volumes:
+      - application-data:/app/data
+
+  backup:
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    command: ["idle"]
+    environment:
+      BACKUP_NAME: ${BACKUP_NAME:?Set a unique deployment backup name}
+      SQLITE_DATABASES: ${SQLITE_DATABASES:-}
+      BACKUP_EXCLUDES: ${BACKUP_EXCLUDES:-}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:?Set the restic repository URL}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?Set the restic repository password}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      B2_ACCOUNT_ID: ${B2_ACCOUNT_ID:-}
+      B2_ACCOUNT_KEY: ${B2_ACCOUNT_KEY:-}
+      RESTIC_KEEP_DAILY: ${RESTIC_KEEP_DAILY:-30}
+      RESTIC_KEEP_WEEKLY: ${RESTIC_KEEP_WEEKLY:-8}
+      RESTIC_KEEP_MONTHLY: ${RESTIC_KEEP_MONTHLY:-12}
+      BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-93600}
+    volumes:
+      - application-data:/source:ro
+      - backup-cache:/cache
+      - backup-stage:/stage
+      - backup-state:/state
+      - backup-restore:/restore
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  application-data:
+  backup-cache:
+  backup-stage:
+  backup-state:
+  backup-restore:

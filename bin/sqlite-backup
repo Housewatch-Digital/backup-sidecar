@@ -1,0 +1,626 @@
+#!/bin/sh
+set -eu
+
+PROGRAM_VERSION="${BACKUP_SIDECAR_VERSION:-0.1.0}"
+
+: "${BACKUP_SOURCE_DIR:=/source}"
+: "${BACKUP_STAGE_ROOT:=/stage}"
+: "${BACKUP_STATE_DIR:=/state}"
+: "${BACKUP_CACHE_DIR:=/cache}"
+: "${BACKUP_NAME:=}"
+: "${BACKUP_EXCLUDES:=}"
+: "${SQLITE_DATABASES:=}"
+: "${SQLITE_BACKUP_TIMEOUT_MS:=30000}"
+: "${RESTIC_AUTO_INIT:=true}"
+: "${RESTIC_KEEP_DAILY:=30}"
+: "${RESTIC_KEEP_WEEKLY:=8}"
+: "${RESTIC_KEEP_MONTHLY:=12}"
+: "${BACKUP_MAX_AGE_SECONDS:=93600}"
+: "${BACKUP_INTERVAL_SECONDS:=86400}"
+: "${BACKUP_INITIAL_DELAY_SECONDS:=300}"
+: "${RESTORE_ROOT:=/restore}"
+: "${BACKUP_HOOK_PRE_DIR:=/hooks/pre-backup.d}"
+: "${BACKUP_HOOK_POST_DIR:=/hooks/post-backup.d}"
+: "${BACKUP_HOOK_FAILURE_DIR:=/hooks/failure.d}"
+
+BACKUP_SOURCE_DIR="${BACKUP_SOURCE_DIR%/}"
+BACKUP_STAGE_ROOT="${BACKUP_STAGE_ROOT%/}"
+BACKUP_STATE_DIR="${BACKUP_STATE_DIR%/}"
+BACKUP_CACHE_DIR="${BACKUP_CACHE_DIR%/}"
+RESTORE_ROOT="${RESTORE_ROOT%/}"
+
+RESTIC_HOST="${RESTIC_HOST:-$BACKUP_NAME}"
+RESTIC_BACKUP_TAG="${RESTIC_BACKUP_TAG:-sqlite-backup:$BACKUP_NAME}"
+RESTIC_GLOBAL_TAG="${RESTIC_GLOBAL_TAG:-sqlite-backup}"
+RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-$BACKUP_CACHE_DIR}"
+export RESTIC_CACHE_DIR
+
+RUN_DIR=""
+RUN_STARTED_EPOCH=""
+
+log() {
+  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
+}
+
+die() {
+  log "ERROR: $*"
+  exit 1
+}
+
+is_uint() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+is_true() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is not installed"
+}
+
+require_env() {
+  env_name="$1"
+  eval "env_value=\${$env_name:-}"
+  [ -n "$env_value" ] || die "$env_name is required"
+}
+
+validate_uint_env() {
+  env_name="$1"
+  eval "env_value=\${$env_name:-}"
+  is_uint "$env_value" || die "$env_name must be a non-negative integer"
+}
+
+validate_identifier() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*) die "BACKUP_NAME may contain only letters, numbers, dots, underscores, and hyphens" ;;
+  esac
+}
+
+validate_safe_directory() {
+  directory="$1"
+  label="$2"
+  [ -n "$directory" ] && [ "$directory" != "/" ] || die "$label must not be empty or /"
+  case "$directory" in
+    /*) ;;
+    *) die "$label must be an absolute path" ;;
+  esac
+}
+
+validate_optional_directory() {
+  directory="$1"
+  label="$2"
+  [ -z "$directory" ] || validate_safe_directory "$directory" "$label"
+}
+
+validate_restic_config() {
+  require_command restic
+  require_env RESTIC_REPOSITORY
+
+  if [ -z "${RESTIC_PASSWORD:-}" ] && [ -z "${RESTIC_PASSWORD_FILE:-}" ]; then
+    die "RESTIC_PASSWORD or RESTIC_PASSWORD_FILE is required"
+  fi
+  if [ -n "${RESTIC_PASSWORD_FILE:-}" ] && [ ! -r "$RESTIC_PASSWORD_FILE" ]; then
+    die "RESTIC_PASSWORD_FILE is not readable: $RESTIC_PASSWORD_FILE"
+  fi
+}
+
+validate_backup_config() {
+  validate_identifier "$BACKUP_NAME"
+  validate_safe_directory "$BACKUP_SOURCE_DIR" BACKUP_SOURCE_DIR
+  validate_safe_directory "$BACKUP_STAGE_ROOT" BACKUP_STAGE_ROOT
+  validate_safe_directory "$BACKUP_STATE_DIR" BACKUP_STATE_DIR
+  validate_safe_directory "$BACKUP_CACHE_DIR" BACKUP_CACHE_DIR
+  validate_optional_directory "$BACKUP_HOOK_PRE_DIR" BACKUP_HOOK_PRE_DIR
+  validate_optional_directory "$BACKUP_HOOK_POST_DIR" BACKUP_HOOK_POST_DIR
+  validate_optional_directory "$BACKUP_HOOK_FAILURE_DIR" BACKUP_HOOK_FAILURE_DIR
+  [ -d "$BACKUP_SOURCE_DIR" ] || die "backup source directory does not exist: $BACKUP_SOURCE_DIR"
+
+  require_command flock
+  require_command jq
+  require_command rsync
+  require_command sqlite3
+  require_command mktemp
+  validate_restic_config
+
+  validate_uint_env SQLITE_BACKUP_TIMEOUT_MS
+  validate_uint_env RESTIC_KEEP_DAILY
+  validate_uint_env RESTIC_KEEP_WEEKLY
+  validate_uint_env RESTIC_KEEP_MONTHLY
+  validate_uint_env BACKUP_MAX_AGE_SECONDS
+  validate_uint_env BACKUP_INTERVAL_SECONDS
+  validate_uint_env BACKUP_INITIAL_DELAY_SECONDS
+
+  if [ "$RESTIC_KEEP_DAILY" -eq 0 ] && [ "$RESTIC_KEEP_WEEKLY" -eq 0 ] && [ "$RESTIC_KEEP_MONTHLY" -eq 0 ]; then
+    die "at least one restic retention setting must be greater than zero"
+  fi
+}
+
+sqlite_quote_path() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+relative_sqlite_path() {
+  database_path="$1"
+  case "$database_path" in
+    "$BACKUP_SOURCE_DIR"/*) printf '%s\n' "${database_path#"$BACKUP_SOURCE_DIR"/}" ;;
+    *) die "SQLite database must be inside BACKUP_SOURCE_DIR: $database_path" ;;
+  esac
+}
+
+for_each_sqlite_database() {
+  callback="$1"
+  while IFS= read -r database_path || [ -n "$database_path" ]; do
+    [ -n "$database_path" ] || continue
+    "$callback" "$database_path"
+  done <<EOF
+$SQLITE_DATABASES
+EOF
+}
+
+validate_sqlite_database() {
+  database_path="$1"
+  relative_sqlite_path "$database_path" >/dev/null
+  [ -f "$database_path" ] || die "SQLite database does not exist: $database_path"
+}
+
+write_rsync_excludes() {
+  exclude_file="$1"
+  : > "$exclude_file"
+
+  while IFS= read -r pattern || [ -n "$pattern" ]; do
+    [ -n "$pattern" ] || continue
+    printf '%s\n' "$pattern" >> "$exclude_file"
+  done <<EOF
+$BACKUP_EXCLUDES
+EOF
+
+  while IFS= read -r database_path || [ -n "$database_path" ]; do
+    [ -n "$database_path" ] || continue
+    relative_path="$(relative_sqlite_path "$database_path")"
+    printf '/%s\n/%s-wal\n/%s-shm\n/%s-journal\n' \
+      "$relative_path" "$relative_path" "$relative_path" "$relative_path" >> "$exclude_file"
+  done <<EOF
+$SQLITE_DATABASES
+EOF
+}
+
+backup_sqlite_databases() {
+  payload_dir="$1"
+  sqlite_list="$payload_dir/.sqlite-backup/sqlite-paths"
+  mkdir -p "$(dirname "$sqlite_list")"
+  : > "$sqlite_list"
+
+  while IFS= read -r database_path || [ -n "$database_path" ]; do
+    [ -n "$database_path" ] || continue
+    validate_sqlite_database "$database_path"
+
+    relative_path="$(relative_sqlite_path "$database_path")"
+    destination="$payload_dir/$relative_path"
+    destination_sql="$(sqlite_quote_path "$destination")"
+    mkdir -p "$(dirname "$destination")"
+
+    log "Creating SQLite snapshot for $relative_path"
+    sqlite3 "$database_path" <<SQL
+.timeout $SQLITE_BACKUP_TIMEOUT_MS
+.backup '$destination_sql'
+SQL
+
+    if ! check_result="$(sqlite3 "$destination" 'PRAGMA quick_check;' 2>&1)"; then
+      die "SQLite quick_check failed for $relative_path: $check_result"
+    fi
+    [ "$check_result" = "ok" ] || die "SQLite quick_check failed for $relative_path: $check_result"
+    rm -f "$destination-wal" "$destination-shm" "$destination-journal"
+    printf '%s\n' "$relative_path" >> "$sqlite_list"
+  done <<EOF
+$SQLITE_DATABASES
+EOF
+}
+
+write_manifest() {
+  payload_dir="$1"
+  created_at="$2"
+  metadata_dir="$payload_dir/.sqlite-backup"
+  mkdir -p "$metadata_dir"
+  {
+    printf 'format_version=2\n'
+    printf 'backup_name=%s\n' "$BACKUP_NAME"
+    printf 'created_at=%s\n' "$created_at"
+    printf 'program_version=%s\n' "$PROGRAM_VERSION"
+    printf 'source_directory=%s\n' "$BACKUP_SOURCE_DIR"
+  } > "$metadata_dir/manifest"
+}
+
+initialize_repository() {
+  if restic cat config >/dev/null 2>&1; then
+    return
+  fi
+
+  if is_true "$RESTIC_AUTO_INIT"; then
+    log "Restic repository is not initialized or could not be opened. Attempting initialization."
+    restic init
+    return
+  fi
+
+  die "restic repository is not initialized or could not be opened"
+}
+
+apply_retention() {
+  set -- restic forget \
+    --host "$RESTIC_HOST" \
+    --tag "$RESTIC_BACKUP_TAG" \
+    --group-by host,tags
+
+  [ "$RESTIC_KEEP_DAILY" -eq 0 ] || set -- "$@" --keep-daily "$RESTIC_KEEP_DAILY"
+  [ "$RESTIC_KEEP_WEEKLY" -eq 0 ] || set -- "$@" --keep-weekly "$RESTIC_KEEP_WEEKLY"
+  [ "$RESTIC_KEEP_MONTHLY" -eq 0 ] || set -- "$@" --keep-monthly "$RESTIC_KEEP_MONTHLY"
+
+  "$@"
+}
+
+write_success_state() {
+  snapshot_id="$1"
+  completed_epoch="$2"
+  completed_at="$3"
+  bytes_staged="$4"
+  temporary="$BACKUP_STATE_DIR/.last-success.$$"
+
+  {
+    printf 'backup_name=%s\n' "$BACKUP_NAME"
+    printf 'completed_at=%s\n' "$completed_at"
+    printf 'completed_epoch=%s\n' "$completed_epoch"
+    printf 'snapshot_id=%s\n' "$snapshot_id"
+    printf 'bytes_staged=%s\n' "$bytes_staged"
+  } > "$temporary"
+  mv "$temporary" "$BACKUP_STATE_DIR/last-success"
+  printf '%s\n' "$completed_epoch" > "$BACKUP_STATE_DIR/.last-success-epoch.tmp"
+  mv "$BACKUP_STATE_DIR/.last-success-epoch.tmp" "$BACKUP_STATE_DIR/last-success-epoch"
+  rm -f "$BACKUP_STATE_DIR/last-failure"
+}
+
+write_failure_state() {
+  exit_code="$1"
+  failed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  temporary="$BACKUP_STATE_DIR/.last-failure.$$"
+  mkdir -p "$BACKUP_STATE_DIR"
+  {
+    printf 'backup_name=%s\n' "$BACKUP_NAME"
+    printf 'failed_at=%s\n' "$failed_at"
+    printf 'exit_code=%s\n' "$exit_code"
+  } > "$temporary"
+  mv "$temporary" "$BACKUP_STATE_DIR/last-failure"
+}
+
+create_hook_list() {
+  hook_dir="$1"
+  hook_list="$2"
+  : > "$hook_list"
+  [ -n "$hook_dir" ] && [ -d "$hook_dir" ] || return 0
+  find "$hook_dir" -mindepth 1 -maxdepth 1 -type f -print | LC_ALL=C sort > "$hook_list"
+}
+
+run_hooks() {
+  phase="$1"
+  hook_dir="$2"
+  hook_list="$RUN_DIR/hooks-$phase"
+  create_hook_list "$hook_dir" "$hook_list"
+
+  while IFS= read -r hook_path || [ -n "$hook_path" ]; do
+    [ -x "$hook_path" ] || continue
+    log "Running $phase hook: $(basename "$hook_path")"
+    "$hook_path"
+  done < "$hook_list"
+}
+
+run_failure_hooks() {
+  [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ] || return 0
+  set +e
+  hook_list="$RUN_DIR/hooks-failure"
+  create_hook_list "$BACKUP_HOOK_FAILURE_DIR" "$hook_list"
+  while IFS= read -r hook_path || [ -n "$hook_path" ]; do
+    [ -x "$hook_path" ] || continue
+    log "Running failure hook: $(basename "$hook_path")"
+    "$hook_path"
+    hook_status="$?"
+    [ "$hook_status" -eq 0 ] || log "WARNING: failure hook exited with status $hook_status: $hook_path"
+  done < "$hook_list"
+  set -e
+}
+
+cleanup_run() {
+  if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
+    rm -rf "$RUN_DIR"
+  fi
+  RUN_DIR=""
+  unset BACKUP_RUN_DIR
+}
+
+on_run_exit() {
+  exit_code="$?"
+  trap - EXIT HUP INT TERM
+  if [ "$exit_code" -ne 0 ]; then
+    export BACKUP_EXIT_CODE="$exit_code"
+    run_failure_hooks
+    write_failure_state "$exit_code"
+  fi
+  cleanup_run
+  exit "$exit_code"
+}
+
+run_backup() {
+  validate_backup_config
+  mkdir -p "$BACKUP_STAGE_ROOT" "$BACKUP_STATE_DIR" "$BACKUP_CACHE_DIR"
+
+  exec 9>"$BACKUP_STATE_DIR/backup.lock"
+  flock -n 9 || die "another backup is already running"
+
+  RUN_STARTED_EPOCH="$(date '+%s')"
+  trap on_run_exit EXIT HUP INT TERM
+  RUN_DIR="$(mktemp -d "$BACKUP_STAGE_ROOT/run.XXXXXX")"
+  export BACKUP_RUN_DIR="$RUN_DIR"
+  payload_dir="$RUN_DIR/payload"
+  exclude_file="$RUN_DIR/rsync-excludes"
+  restic_output="$RUN_DIR/restic-backup.jsonl"
+  mkdir -p "$payload_dir"
+
+  initialize_repository
+  run_hooks pre-backup "$BACKUP_HOOK_PRE_DIR"
+  write_rsync_excludes "$exclude_file"
+  backup_sqlite_databases "$payload_dir"
+
+  log "Copying ordinary files from $BACKUP_SOURCE_DIR"
+  rsync -a --exclude-from="$exclude_file" "$BACKUP_SOURCE_DIR"/ "$payload_dir"/
+
+  created_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  write_manifest "$payload_dir" "$created_at"
+  bytes_staged="$(du -sk "$payload_dir" | awk '{print $1 * 1024}')"
+
+  log "Uploading staged snapshot to restic repository"
+  (
+    cd "$payload_dir"
+    restic backup \
+      --host "$RESTIC_HOST" \
+      --tag "$RESTIC_BACKUP_TAG" \
+      --tag "$RESTIC_GLOBAL_TAG" \
+      --json \
+      .
+  ) | tee "$restic_output"
+
+  snapshot_id="$(jq -r 'select(.message_type == "summary") | .snapshot_id // empty' "$restic_output" | tail -n 1)"
+  if [ -z "$snapshot_id" ]; then
+    snapshot_id="$(restic snapshots --host "$RESTIC_HOST" --tag "$RESTIC_BACKUP_TAG" --latest 1 --json | jq -r '.[0].id // empty')"
+  fi
+  [ -n "$snapshot_id" ] || die "restic completed without returning a snapshot ID"
+
+  log "Applying snapshot retention"
+  apply_retention
+
+  export BACKUP_SNAPSHOT_ID="$snapshot_id"
+  run_hooks post-backup "$BACKUP_HOOK_POST_DIR"
+
+  completed_epoch="$(date '+%s')"
+  completed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  write_success_state "$snapshot_id" "$completed_epoch" "$completed_at" "$bytes_staged"
+
+  duration="$((completed_epoch - RUN_STARTED_EPOCH))"
+  log "Backup completed: snapshot=$snapshot_id bytes=$bytes_staged duration_seconds=$duration"
+
+  cleanup_run
+  trap - EXIT HUP INT TERM
+}
+
+run_prune() {
+  validate_identifier "$BACKUP_NAME"
+  validate_restic_config
+  mkdir -p "$BACKUP_STATE_DIR"
+  exec 9>"$BACKUP_STATE_DIR/backup.lock"
+  flock -n 9 || die "another backup or prune is already running"
+  log "Pruning unreferenced restic data"
+  restic prune
+  log "Prune completed"
+}
+
+run_check() {
+  validate_identifier "$BACKUP_NAME"
+  validate_restic_config
+  restic check "$@"
+}
+
+list_snapshots() {
+  validate_identifier "$BACKUP_NAME"
+  validate_restic_config
+  restic snapshots --host "$RESTIC_HOST" --tag "$RESTIC_BACKUP_TAG" "$@"
+}
+
+ensure_snapshot_exists() {
+  if ! snapshots_json="$(restic snapshots --host "$RESTIC_HOST" --tag "$RESTIC_BACKUP_TAG" --latest 1 --json)"; then
+    die "could not list restic snapshots"
+  fi
+  printf '%s\n' "$snapshots_json" | jq -e 'length > 0' >/dev/null || \
+    die "no snapshots found for $BACKUP_NAME"
+}
+
+verify_restore() {
+  target="$1"
+  metadata_dir="$target/.sqlite-backup"
+  sqlite_list="$metadata_dir/sqlite-paths"
+  manifest="$metadata_dir/manifest"
+
+  [ -f "$manifest" ] || die "restore manifest not found under $target"
+  [ -f "$sqlite_list" ] || die "SQLite path list not found under $target"
+
+  while IFS= read -r relative_path || [ -n "$relative_path" ]; do
+    [ -n "$relative_path" ] || continue
+    case "$relative_path" in
+      /*|../*|*/../*|*/..) die "unsafe SQLite path in restore metadata: $relative_path" ;;
+    esac
+    restored_database="$target/$relative_path"
+    [ -f "$restored_database" ] || die "restored SQLite database is missing: $relative_path"
+    if ! check_result="$(sqlite3 "$restored_database" 'PRAGMA quick_check;' 2>&1)"; then
+      die "restored SQLite quick_check failed for $relative_path: $check_result"
+    fi
+    [ "$check_result" = "ok" ] || die "restored SQLite quick_check failed for $relative_path: $check_result"
+    log "Verified restored SQLite database: $relative_path"
+  done < "$sqlite_list"
+
+  log "Restore verification completed"
+}
+
+restore_latest() {
+  target="${1:-}"
+  validate_identifier "$BACKUP_NAME"
+  validate_restic_config
+  validate_safe_directory "$RESTORE_ROOT" RESTORE_ROOT
+  [ -n "$target" ] || die "restore-latest requires a target directory"
+
+  case "$target" in
+    "$RESTORE_ROOT"|"$RESTORE_ROOT"/*) ;;
+    *) die "restore target must be inside RESTORE_ROOT: $RESTORE_ROOT" ;;
+  esac
+  [ "$target" != "$BACKUP_SOURCE_DIR" ] || die "refusing to restore into the live source directory"
+
+  mkdir -p "$target"
+  if [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    die "restore target must be empty: $target"
+  fi
+
+  ensure_snapshot_exists
+  log "Restoring latest snapshot tagged $RESTIC_BACKUP_TAG into $target"
+  restic restore \
+    --host "$RESTIC_HOST" \
+    --tag "$RESTIC_BACKUP_TAG" \
+    --target "$target" \
+    latest
+  verify_restore "$target"
+}
+
+health_check() {
+  validate_uint_env BACKUP_MAX_AGE_SECONDS
+  epoch_file="$BACKUP_STATE_DIR/last-success-epoch"
+  [ -r "$epoch_file" ] || die "no successful backup has been recorded"
+  last_success_epoch="$(sed -n '1p' "$epoch_file")"
+  is_uint "$last_success_epoch" || die "last-success epoch is invalid"
+  now_epoch="$(date '+%s')"
+  age="$((now_epoch - last_success_epoch))"
+  [ "$age" -ge 0 ] || die "last-success timestamp is in the future"
+  [ "$age" -le "$BACKUP_MAX_AGE_SECONDS" ] || die "last successful backup is $age seconds old"
+  log "Backup health is current: age_seconds=$age"
+}
+
+show_status() {
+  if [ -f "$BACKUP_STATE_DIR/last-success" ]; then
+    printf '%s\n' "Last successful backup:"
+    sed 's/^/  /' "$BACKUP_STATE_DIR/last-success"
+  else
+    printf '%s\n' "No successful backup recorded."
+  fi
+  if [ -f "$BACKUP_STATE_DIR/last-failure" ]; then
+    printf '%s\n' "Last failed backup:"
+    sed 's/^/  /' "$BACKUP_STATE_DIR/last-failure"
+  fi
+}
+
+check_writable_directory() {
+  directory="$1"
+  label="$2"
+  mkdir -p "$directory"
+  probe="$(mktemp "$directory/doctor.XXXXXX")" || die "$label is not writable: $directory"
+  rm -f "$probe"
+  log "$label is writable: $directory"
+}
+
+doctor() {
+  validate_backup_config
+  check_writable_directory "$BACKUP_STAGE_ROOT" BACKUP_STAGE_ROOT
+  check_writable_directory "$BACKUP_STATE_DIR" BACKUP_STATE_DIR
+  check_writable_directory "$BACKUP_CACHE_DIR" BACKUP_CACHE_DIR
+
+  for_each_sqlite_database validate_sqlite_database
+  while IFS= read -r database_path || [ -n "$database_path" ]; do
+    [ -n "$database_path" ] || continue
+    relative_path="$(relative_sqlite_path "$database_path")"
+    if ! check_result="$(sqlite3 "$database_path" 'PRAGMA quick_check;' 2>&1)"; then
+      die "SQLite quick_check failed for $relative_path: $check_result"
+    fi
+    [ "$check_result" = "ok" ] || die "SQLite quick_check failed for $relative_path: $check_result"
+    log "SQLite database is readable and healthy: $relative_path"
+  done <<EOF
+$SQLITE_DATABASES
+EOF
+
+  if restic cat config >/dev/null 2>&1; then
+    log "Restic repository is accessible"
+  elif is_true "$RESTIC_AUTO_INIT"; then
+    log "WARNING: Restic repository could not be opened; the next backup will attempt to initialize it"
+  else
+    die "restic repository is not initialized or could not be opened"
+  fi
+  log "Configuration check completed"
+}
+
+run_idle() {
+  validate_backup_config
+  log "Idle mode is ready. Run 'sqlite-backup run' from your platform scheduler."
+  while :; do
+    sleep 86400
+  done
+}
+
+run_daemon() {
+  validate_backup_config
+  if [ "$BACKUP_INITIAL_DELAY_SECONDS" -gt 0 ]; then
+    log "Waiting $BACKUP_INITIAL_DELAY_SECONDS seconds before the first backup"
+    sleep "$BACKUP_INITIAL_DELAY_SECONDS"
+  fi
+  while :; do
+    run_backup
+    log "Waiting $BACKUP_INTERVAL_SECONDS seconds before the next backup"
+    sleep "$BACKUP_INTERVAL_SECONDS"
+  done
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: sqlite-backup COMMAND [ARGUMENTS]
+
+Commands:
+  run                       Create, verify, upload, and retain one backup
+  idle                      Stay alive for an external platform scheduler
+  daemon                    Run backups on an internal interval
+  doctor                    Validate paths, databases, tools, and repository access
+  snapshots [ARGS]          List snapshots for this backup name
+  check [ARGS]              Check the restic repository
+  prune                     Reclaim data no longer used by retained snapshots
+  restore-latest TARGET     Restore the latest snapshot to an empty directory
+  verify TARGET             Verify SQLite files in a restored backup
+  health                    Fail when the last successful backup is too old
+  status                    Print the last success and failure records
+  version                   Print the sidecar version
+USAGE
+}
+
+command_name="${1:-idle}"
+[ "$#" -eq 0 ] || shift
+
+case "$command_name" in
+  run) run_backup ;;
+  idle) run_idle ;;
+  daemon) run_daemon ;;
+  doctor) doctor ;;
+  snapshots) list_snapshots "$@" ;;
+  check) run_check "$@" ;;
+  prune) run_prune ;;
+  restore-latest) restore_latest "${1:-}" ;;
+  verify) [ "$#" -eq 1 ] || die "verify requires one target directory"; verify_restore "$1" ;;
+  health) health_check ;;
+  status) show_status ;;
+  version) printf '%s\n' "$PROGRAM_VERSION" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; die "unknown command: $command_name" ;;
+esac

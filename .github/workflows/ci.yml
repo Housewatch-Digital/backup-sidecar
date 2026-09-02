@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test tools
+        run: sudo apt-get update && sudo apt-get install -y jq restic rsync sqlite3 util-linux
+      - name: Run tests
+        run: make test
+      - name: Check shell syntax
+        run: sh -n bin/sqlite-backup tests/test_container.sh
+      - name: Build image
+        run: make image
+      - name: Run container integration test
+        run: make test-container
