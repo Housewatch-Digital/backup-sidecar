@@ -8,7 +8,7 @@ mode when a host scheduler or container platform will run `sqlite-backup run`.
 ```yaml
 services:
   backup:
-    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.0
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.1
     command: ["daemon"]
     restart: unless-stopped
     init: true

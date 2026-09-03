@@ -1,6 +1,6 @@
 FROM alpine:3.24
 
-ARG VERSION=0.1.0
+ARG VERSION=0.1.1
 
 LABEL org.opencontainers.image.title="SQLite Backup Sidecar" \
       org.opencontainers.image.description="SQLite-aware and file-volume backups to Restic repositories" \

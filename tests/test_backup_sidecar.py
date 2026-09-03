@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -186,6 +187,25 @@ class BackupSidecarTest(unittest.TestCase):
         hook.write_text(f"#!/bin/sh\nset -eu\n{body}\n")
         hook.chmod(0o755)
 
+    def _write_fake_rsync(self) -> None:
+        real_rsync = shutil.which("rsync")
+        self.assertIsNotNone(real_rsync)
+        fake_rsync = self.fake_bin / "rsync"
+        fake_rsync.write_text(
+            textwrap.dedent(
+                f"""\
+                #!/bin/sh
+                {shlex.quote(real_rsync or '')} "$@"
+                real_status="$?"
+                [ "$real_status" -eq 0 ] || exit "$real_status"
+                forced_status="${{FAKE_RSYNC_STATUS:-0}}"
+                [ "$forced_status" -eq 24 ] && printf '%s\n' 'file has vanished: fake temporary file' >&2
+                exit "$forced_status"
+                """
+            )
+        )
+        fake_rsync.chmod(0o755)
+
     def test_shell_syntax(self) -> None:
         result = subprocess.run(
             ["sh", "-n", str(SCRIPT)],
@@ -198,7 +218,7 @@ class BackupSidecarTest(unittest.TestCase):
 
     def test_version(self) -> None:
         result = self._run("version")
-        self.assertEqual("0.1.0\n", result.stdout)
+        self.assertEqual("0.1.1\n", result.stdout)
 
     def test_live_wal_backup_and_restore(self) -> None:
         stop = threading.Event()
@@ -275,6 +295,33 @@ class BackupSidecarTest(unittest.TestCase):
         self._run("run", environment=self._environment(SQLITE_DATABASES=""))
         self.assertTrue((self.capture / "application data" / "application.db").is_file())
         self.assertEqual("", (self.capture / ".sqlite-backup" / "sqlite-paths").read_text())
+
+    def test_vanished_source_files_warn_and_allow_backup(self) -> None:
+        self._write_fake_rsync()
+
+        result = self._run(
+            "run",
+            environment=self._environment(FAKE_RSYNC_STATUS="24"),
+        )
+
+        self.assertIn("source files vanished while staging", result.stderr)
+        self.assertTrue((self.capture / "uploads" / "report 2026.txt").is_file())
+        self.assertTrue((self.state / "last-success").is_file())
+        self.assertFalse((self.state / "last-failure").exists())
+
+    def test_other_rsync_errors_fail_backup(self) -> None:
+        self._write_fake_rsync()
+
+        result = self._run(
+            "run",
+            check=False,
+            environment=self._environment(FAKE_RSYNC_STATUS="23"),
+        )
+
+        self.assertEqual(23, result.returncode)
+        self.assertFalse(self.capture.exists())
+        self.assertIn("exit_code=23", (self.state / "last-failure").read_text())
+        self.assertFalse((self.state / "last-success").exists())
 
     def test_doctor_accepts_backend_credentials_managed_by_restic(self) -> None:
         environment = self._environment(RESTIC_REPOSITORY="s3:https://example.test/bucket")

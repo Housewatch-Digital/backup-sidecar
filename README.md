@@ -25,6 +25,8 @@ Ordinary files are copied one at a time and are not a point-in-time filesystem
 snapshot. This is suitable for immutable files, atomically replaced files, and
 content that tolerates file-level consistency. Use a storage snapshot or stop
 writes when an application needs a single instant across several ordinary files.
+Files that vanish during staging are omitted and produce a warning without
+failing the backup.
 
 ## Quick start
 
@@ -34,7 +36,7 @@ Mount application data read-only under `/source`. Each line in
 ```yaml
 services:
   backup:
-    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.0
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.1
     command: ["daemon"]
     environment:
       BACKUP_NAME: example-production
@@ -105,6 +107,10 @@ database as an ordinary file.
 /application/tmp/
 *.log
 ```
+
+Exclude known temporary paths to avoid repeated vanished-file warnings. The
+sidecar does not exclude `*.tmp` automatically because an application may use
+that suffix for data that must be backed up.
 
 ## Backup sequence
 

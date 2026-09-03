@@ -6,7 +6,7 @@ services:
       - application-data:/app/data
 
   backup:
-    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.0
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.1
     restart: unless-stopped
     init: true
     read_only: true
