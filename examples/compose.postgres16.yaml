@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set the application database}
+      POSTGRES_USER: ${POSTGRES_USER:?Set the application database user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set the application database password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backup:
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.2.0-postgres16
+    restart: unless-stopped
+    init: true
+    read_only: true
+    command: ["daemon"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BACKUP_NAME: ${BACKUP_NAME:?Set a unique deployment backup name}
+      SQLITE_DATABASES: ""
+      POSTGRES_DATABASES: ${POSTGRES_DATABASES:?Set newline-separated database names}
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:?Set the application database user}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set the application database password}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:?Set the Restic repository URL}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?Set the Restic repository password}
+      BACKUP_INITIAL_DELAY_SECONDS: ${BACKUP_INITIAL_DELAY_SECONDS:-60}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-21600}
+      RESTIC_KEEP_DAILY: ${RESTIC_KEEP_DAILY:-30}
+      RESTIC_KEEP_WEEKLY: ${RESTIC_KEEP_WEEKLY:-8}
+      RESTIC_KEEP_MONTHLY: ${RESTIC_KEEP_MONTHLY:-12}
+      BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-25200}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      B2_ACCOUNT_ID: ${B2_ACCOUNT_ID:-}
+      B2_ACCOUNT_KEY: ${B2_ACCOUNT_KEY:-}
+    volumes:
+      - backup-cache:/cache
+      - backup-stage:/stage
+      - backup-state:/state
+      - backup-restore:/restore
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres-data:
+  backup-cache:
+  backup-stage:
+  backup-state:
+  backup-restore:

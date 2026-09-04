@@ -13,6 +13,19 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: default
+            postgres_major: "16"
+            suffix: ""
+            moving_tag: latest
+            publish_moving_tag: false
+          - target: postgres
+            postgres_major: "16"
+            suffix: "-postgres16"
+            moving_tag: postgres16
+            publish_moving_tag: true
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -28,15 +41,19 @@ jobs:
         with:
           images: ghcr.io/housewatch-digital/backup-sidecar
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+            type=semver,pattern={{version}},suffix=${{ matrix.suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=${{ matrix.suffix }}
+            type=raw,value=${{ matrix.moving_tag }},enable=${{ matrix.publish_moving_tag }}
+            type=sha,suffix=${{ matrix.suffix }}
       - name: Build and publish
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            POSTGRES_MAJOR=${{ matrix.postgres_major }}

@@ -18,8 +18,40 @@ jobs:
       - name: Run tests
         run: make test
       - name: Check shell syntax
-        run: sh -n bin/sqlite-backup tests/test_container.sh
+        run: >-
+          sh -n
+          bin/sqlite-backup
+          bin/backup-sidecar
+          variants/postgres/lib/postgresql.sh
+          variants/postgres/hooks/doctor.d/10-postgresql
+          variants/postgres/hooks/pre-backup.d/10-postgresql
+          variants/postgres/hooks/verify.d/10-postgresql
+          tests/test_container.sh
+          tests/test_postgres_container.sh
       - name: Build image
         run: make image
       - name: Run container integration test
         run: make test-container
+
+  postgres:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - major: "16"
+            image_target: postgres
+            image_tag: sqlite-backup-sidecar:postgres16-dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build PostgreSQL ${{ matrix.major }} image
+        run: >-
+          docker build
+          --target ${{ matrix.image_target }}
+          --build-arg POSTGRES_MAJOR=${{ matrix.major }}
+          --build-arg VERSION=$(cat VERSION)
+          --tag ${{ matrix.image_tag }}
+          .
+      - name: Run PostgreSQL ${{ matrix.major }} container integration test
+        env:
+          BACKUP_POSTGRES_TEST_IMAGE: ${{ matrix.image_tag }}
+        run: tests/test_postgres_container.sh

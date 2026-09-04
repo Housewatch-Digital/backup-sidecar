@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+: "${POSTGRES_HELPER_FILE:=/usr/local/lib/backup-sidecar/postgresql.sh}"
+. "$POSTGRES_HELPER_FILE"
+
+postgres_enabled || exit 0
+postgres_validate_configuration
+
+: "${BACKUP_PAYLOAD_DIR:?BACKUP_PAYLOAD_DIR is required}"
+
+output_dir="$BACKUP_PAYLOAD_DIR/.backup-sidecar/postgresql"
+manifest="$output_dir/databases.jsonl"
+mkdir -p "$output_dir"
+: > "$manifest"
+
+client_version="$(postgres_client_version)"
+database_index=0
+while IFS= read -r database || [ -n "$database" ]; do
+  [ -n "$database" ] || continue
+  database_index="$((database_index + 1))"
+  filename="$(printf '%04d.dump' "$database_index")"
+  relative_path=".backup-sidecar/postgresql/$filename"
+  temporary="$output_dir/.$filename.tmp"
+  destination="$output_dir/$filename"
+
+  postgres_log "creating custom-format dump: database=$database"
+  pg_dump \
+    --format=custom \
+    --compress=0 \
+    --no-owner \
+    --no-acl \
+    --file="$temporary" \
+    --dbname="$database"
+  pg_restore --list "$temporary" >/dev/null
+  mv "$temporary" "$destination"
+
+  server_version="$(postgres_server_version "$database")"
+  created_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  jq -n -c \
+    --arg database "$database" \
+    --arg path "$relative_path" \
+    --arg client_version "$client_version" \
+    --arg server_version "$server_version" \
+    --arg created_at "$created_at" \
+    '{database: $database, path: $path, format: "custom", client_version: $client_version, server_version: $server_version, created_at: $created_at}' \
+    >> "$manifest"
+done <<EOF
+$POSTGRES_DATABASES
+EOF
+
+postgres_log "dump creation completed: databases=$database_index"

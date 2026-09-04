@@ -1,14 +1,14 @@
 # Docker Compose deployment
 
 Use `daemon` mode when the sidecar should schedule its own backups. Use `idle`
-mode when a host scheduler or container platform will run `sqlite-backup run`.
+mode when a host scheduler or container platform will run `backup-sidecar run`.
 
 ## Multiple volume example
 
 ```yaml
 services:
   backup:
-    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.1
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.2.0
     command: ["daemon"]
     restart: unless-stopped
     init: true

@@ -56,6 +56,6 @@ Compose file committed to source control.
 cannot open one. Set it to `false` when repository creation should be a separate,
 controlled operation.
 
-`sqlite-backup doctor` does not initialize a repository. If auto-initialization is
+`backup-sidecar doctor` does not initialize a repository. If auto-initialization is
 enabled, it reports inaccessible or uninitialized storage as a warning so the
 first backup can attempt initialization.

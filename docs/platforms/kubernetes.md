@@ -20,7 +20,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: backup
-              image: ghcr.io/housewatch-digital/backup-sidecar:0.1.1
+              image: ghcr.io/housewatch-digital/backup-sidecar:0.2.0
               args: ["run"]
               env:
                 - name: BACKUP_NAME

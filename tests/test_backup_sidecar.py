@@ -32,6 +32,8 @@ class BackupSidecarTest(unittest.TestCase):
         self.pre_hooks = self.root / "hooks" / "pre-backup.d"
         self.post_hooks = self.root / "hooks" / "post-backup.d"
         self.failure_hooks = self.root / "hooks" / "failure.d"
+        self.doctor_hooks = self.root / "hooks" / "doctor.d"
+        self.verify_hooks = self.root / "hooks" / "verify.d"
         self.hook_log = self.root / "hook.log"
         for directory in (
             self.source,
@@ -43,6 +45,8 @@ class BackupSidecarTest(unittest.TestCase):
             self.pre_hooks,
             self.post_hooks,
             self.failure_hooks,
+            self.doctor_hooks,
+            self.verify_hooks,
         ):
             directory.mkdir(parents=True)
 
@@ -99,7 +103,7 @@ class BackupSidecarTest(unittest.TestCase):
                     done
                     available=false
                     case "$tag" in
-                      sqlite-backup:*) [ "${FAKE_RESTIC_NEW_SNAPSHOTS:-true}" = true ] && available=true ;;
+                      sqlite-backup:*|backup-sidecar:*) [ "${FAKE_RESTIC_NEW_SNAPSHOTS:-true}" = true ] && available=true ;;
                     esac
                     if [ "$json" = true ]; then
                       if [ "$available" = true ]; then
@@ -159,6 +163,8 @@ class BackupSidecarTest(unittest.TestCase):
                 "BACKUP_HOOK_PRE_DIR": str(self.pre_hooks),
                 "BACKUP_HOOK_POST_DIR": str(self.post_hooks),
                 "BACKUP_HOOK_FAILURE_DIR": str(self.failure_hooks),
+                "BACKUP_HOOK_DOCTOR_DIR": str(self.doctor_hooks),
+                "BACKUP_HOOK_VERIFY_DIR": str(self.verify_hooks),
                 "FAKE_RESTIC_CAPTURE": str(self.capture),
                 "FAKE_RESTIC_SELECTED_TAG": str(self.root / "selected-tag"),
                 "HOOK_LOG": str(self.hook_log),
@@ -218,7 +224,7 @@ class BackupSidecarTest(unittest.TestCase):
 
     def test_version(self) -> None:
         result = self._run("version")
-        self.assertEqual("0.1.1\n", result.stdout)
+        self.assertEqual("0.2.0\n", result.stdout)
 
     def test_live_wal_backup_and_restore(self) -> None:
         stop = threading.Event()
@@ -296,6 +302,16 @@ class BackupSidecarTest(unittest.TestCase):
         self.assertTrue((self.capture / "application data" / "application.db").is_file())
         self.assertEqual("", (self.capture / ".sqlite-backup" / "sqlite-paths").read_text())
 
+    def test_restic_tag_prefix_can_select_a_variant_namespace(self) -> None:
+        environment = self._environment(RESTIC_TAG_PREFIX="backup-sidecar")
+        self._run("run", environment=environment)
+        restored = self.restore_root / "generic-tag"
+        self._run("restore-latest", str(restored), environment=environment)
+        self.assertEqual(
+            "backup-sidecar:test-application\n",
+            (self.root / "selected-tag").read_text(),
+        )
+
     def test_vanished_source_files_warn_and_allow_backup(self) -> None:
         self._write_fake_rsync()
 
@@ -353,6 +369,46 @@ class BackupSidecarTest(unittest.TestCase):
         self.assertTrue(lines[0].startswith("pre-10:"))
         self.assertTrue(lines[1].startswith("pre-20:"))
         self.assertEqual("post:0123456789abcdef", lines[2])
+
+    def test_doctor_and_verify_hooks_receive_context(self) -> None:
+        self._write_hook(
+            self.doctor_hooks,
+            "10-doctor",
+            'printf "doctor\n" >> "$HOOK_LOG"',
+        )
+        self._write_hook(
+            self.verify_hooks,
+            "10-verify",
+            'printf "verify:%s\n" "$BACKUP_RESTORE_DIR" >> "$HOOK_LOG"',
+        )
+
+        self._run("doctor")
+        self._run("run")
+        restored = self.restore_root / "hook-rehearsal"
+        self._run("restore-latest", str(restored))
+
+        self.assertEqual(
+            ["doctor", f"verify:{restored}"],
+            self.hook_log.read_text().splitlines(),
+        )
+
+    def test_pre_hook_payload_is_not_replaced_by_source_metadata(self) -> None:
+        source_metadata = self.source / ".backup-sidecar"
+        source_metadata.mkdir()
+        (source_metadata / "generated.txt").write_text("source\n")
+        self._write_hook(
+            self.pre_hooks,
+            "10-generate",
+            'mkdir -p "$BACKUP_PAYLOAD_DIR/.backup-sidecar"; '
+            'printf "hook\\n" > "$BACKUP_PAYLOAD_DIR/.backup-sidecar/generated.txt"',
+        )
+
+        self._run("run")
+
+        self.assertEqual(
+            "hook\n",
+            (self.capture / ".backup-sidecar" / "generated.txt").read_text(),
+        )
 
     def test_failed_run_invokes_failure_hook(self) -> None:
         self._write_hook(

@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+: "${POSTGRES_HELPER_FILE:=/usr/local/lib/backup-sidecar/postgresql.sh}"
+. "$POSTGRES_HELPER_FILE"
+
+postgres_enabled || exit 0
+postgres_validate_configuration
+postgres_log "configuration check completed"

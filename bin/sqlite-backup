@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-PROGRAM_VERSION="${BACKUP_SIDECAR_VERSION:-0.1.1}"
+PROGRAM_VERSION="${BACKUP_SIDECAR_VERSION:-0.2.0}"
 
 : "${BACKUP_SOURCE_DIR:=/source}"
 : "${BACKUP_STAGE_ROOT:=/stage}"
@@ -22,6 +22,9 @@ PROGRAM_VERSION="${BACKUP_SIDECAR_VERSION:-0.1.1}"
 : "${BACKUP_HOOK_PRE_DIR:=/hooks/pre-backup.d}"
 : "${BACKUP_HOOK_POST_DIR:=/hooks/post-backup.d}"
 : "${BACKUP_HOOK_FAILURE_DIR:=/hooks/failure.d}"
+: "${BACKUP_HOOK_DOCTOR_DIR:=/hooks/doctor.d}"
+: "${BACKUP_HOOK_VERIFY_DIR:=/hooks/verify.d}"
+: "${RESTIC_TAG_PREFIX:=sqlite-backup}"
 
 BACKUP_SOURCE_DIR="${BACKUP_SOURCE_DIR%/}"
 BACKUP_STAGE_ROOT="${BACKUP_STAGE_ROOT%/}"
@@ -30,8 +33,8 @@ BACKUP_CACHE_DIR="${BACKUP_CACHE_DIR%/}"
 RESTORE_ROOT="${RESTORE_ROOT%/}"
 
 RESTIC_HOST="${RESTIC_HOST:-$BACKUP_NAME}"
-RESTIC_BACKUP_TAG="${RESTIC_BACKUP_TAG:-sqlite-backup:$BACKUP_NAME}"
-RESTIC_GLOBAL_TAG="${RESTIC_GLOBAL_TAG:-sqlite-backup}"
+RESTIC_BACKUP_TAG="${RESTIC_BACKUP_TAG:-$RESTIC_TAG_PREFIX:$BACKUP_NAME}"
+RESTIC_GLOBAL_TAG="${RESTIC_GLOBAL_TAG:-$RESTIC_TAG_PREFIX}"
 RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-$BACKUP_CACHE_DIR}"
 export RESTIC_CACHE_DIR
 
@@ -120,6 +123,8 @@ validate_backup_config() {
   validate_optional_directory "$BACKUP_HOOK_PRE_DIR" BACKUP_HOOK_PRE_DIR
   validate_optional_directory "$BACKUP_HOOK_POST_DIR" BACKUP_HOOK_POST_DIR
   validate_optional_directory "$BACKUP_HOOK_FAILURE_DIR" BACKUP_HOOK_FAILURE_DIR
+  validate_optional_directory "$BACKUP_HOOK_DOCTOR_DIR" BACKUP_HOOK_DOCTOR_DIR
+  validate_optional_directory "$BACKUP_HOOK_VERIFY_DIR" BACKUP_HOOK_VERIFY_DIR
   [ -d "$BACKUP_SOURCE_DIR" ] || die "backup source directory does not exist: $BACKUP_SOURCE_DIR"
 
   require_command flock
@@ -173,6 +178,10 @@ validate_sqlite_database() {
 write_rsync_excludes() {
   exclude_file="$1"
   : > "$exclude_file"
+
+  # Hooks may place generated backup artifacts here before ordinary files are
+  # staged. Never allow a source volume to replace those artifacts.
+  printf '%s\n' '/.backup-sidecar/' >> "$exclude_file"
 
   while IFS= read -r pattern || [ -n "$pattern" ]; do
     [ -n "$pattern" ] || continue
@@ -326,14 +335,22 @@ create_hook_list() {
 run_hooks() {
   phase="$1"
   hook_dir="$2"
-  hook_list="$RUN_DIR/hooks-$phase"
+  hook_work_dir="${RUN_DIR:-${TMPDIR:-/tmp}}"
+  hook_list="$hook_work_dir/hooks-$phase.$$"
   create_hook_list "$hook_dir" "$hook_list"
 
   while IFS= read -r hook_path || [ -n "$hook_path" ]; do
     [ -x "$hook_path" ] || continue
     log "Running $phase hook: $(basename "$hook_path")"
-    "$hook_path"
+    if "$hook_path"; then
+      continue
+    else
+      hook_status="$?"
+      rm -f "$hook_list"
+      return "$hook_status"
+    fi
   done < "$hook_list"
+  rm -f "$hook_list"
 }
 
 run_failure_hooks() {
@@ -357,6 +374,8 @@ cleanup_run() {
   fi
   RUN_DIR=""
   unset BACKUP_RUN_DIR
+  unset BACKUP_PAYLOAD_DIR
+  unset BACKUP_RESTORE_DIR
 }
 
 on_run_exit() {
@@ -386,6 +405,7 @@ run_backup() {
   exclude_file="$RUN_DIR/rsync-excludes"
   restic_output="$RUN_DIR/restic-backup.jsonl"
   mkdir -p "$payload_dir"
+  export BACKUP_PAYLOAD_DIR="$payload_dir"
 
   initialize_repository
   run_hooks pre-backup "$BACKUP_HOOK_PRE_DIR"
@@ -487,6 +507,10 @@ verify_restore() {
     log "Verified restored SQLite database: $relative_path"
   done < "$sqlite_list"
 
+  export BACKUP_RESTORE_DIR="$target"
+  run_hooks verify "$BACKUP_HOOK_VERIFY_DIR"
+  unset BACKUP_RESTORE_DIR
+
   log "Restore verification completed"
 }
 
@@ -572,6 +596,8 @@ doctor() {
 $SQLITE_DATABASES
 EOF
 
+  run_hooks doctor "$BACKUP_HOOK_DOCTOR_DIR"
+
   if restic cat config >/dev/null 2>&1; then
     log "Restic repository is accessible"
   elif is_true "$RESTIC_AUTO_INIT"; then
@@ -584,7 +610,7 @@ EOF
 
 run_idle() {
   validate_backup_config
-  log "Idle mode is ready. Run 'sqlite-backup run' from your platform scheduler."
+  log "Idle mode is ready. Run 'backup-sidecar run' from your platform scheduler."
   while :; do
     sleep 86400
   done
@@ -605,7 +631,7 @@ run_daemon() {
 
 usage() {
   cat <<'USAGE'
-Usage: sqlite-backup COMMAND [ARGUMENTS]
+Usage: backup-sidecar COMMAND [ARGUMENTS]
 
 Commands:
   run                       Create, verify, upload, and retain one backup
@@ -616,7 +642,7 @@ Commands:
   check [ARGS]              Check the restic repository
   prune                     Reclaim data no longer used by retained snapshots
   restore-latest TARGET     Restore the latest snapshot to an empty directory
-  verify TARGET             Verify SQLite files in a restored backup
+  verify TARGET             Verify supported artifacts in a restored backup
   health                    Fail when the last successful backup is too old
   status                    Print the last success and failure records
   version                   Print the sidecar version

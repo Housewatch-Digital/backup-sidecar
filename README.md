@@ -1,9 +1,10 @@
-# SQLite Backup Sidecar
+# Backup Sidecar
 
-SQLite Backup Sidecar creates consistent SQLite backups without stopping the
-application. It uses SQLite's online backup API, verifies each copy, stages any
-ordinary files mounted beside the databases, and sends the completed snapshot to
-an encrypted Restic repository.
+Backup Sidecar creates engine-aware database backups without copying live database
+storage. The base image uses SQLite's online backup API, verifies each copy,
+stages ordinary files mounted beside the databases, and sends the completed
+snapshot to an encrypted Restic repository. The `postgres16` image adds verified
+PostgreSQL 16 logical dumps through `pg_dump`.
 
 The container works with Docker Compose, Coolify, Kubernetes, and other container
 platforms. Restic supports local storage, SFTP, REST servers, S3-compatible
@@ -11,15 +12,16 @@ storage, Backblaze B2, Azure Blob Storage, and Google Cloud Storage.
 
 ## What it protects
 
-- One or more explicitly configured SQLite databases
+- One or more explicitly configured SQLite databases in the base image
+- One or more PostgreSQL 16 databases in the `postgres16` image
 - Ordinary files from one or more volumes mounted below `/source`
 - Encrypted, deduplicated Restic snapshots
-- Restores verified with SQLite `PRAGMA quick_check`
+- Restores verified with SQLite `PRAGMA quick_check` and/or `pg_restore --list`
 
-Do not copy live PostgreSQL or MySQL data directories with this sidecar. Use
-`pg_dump`, `pg_basebackup`, `mysqldump`, or another engine-aware backup method,
-then place the resulting export under `/source` if this sidecar should upload it.
-The [hook support](docs/hooks.md) can automate that export.
+Do not copy live PostgreSQL or MySQL data directories. Use the PostgreSQL variant,
+another engine-aware backup method, or a custom [hook](docs/hooks.md). The
+PostgreSQL variant creates logical dumps; it does not back up PostgreSQL roles,
+tablespaces, physical replication state, or the server data directory.
 
 Ordinary files are copied one at a time and are not a point-in-time filesystem
 snapshot. This is suitable for immutable files, atomically replaced files, and
@@ -28,7 +30,7 @@ writes when an application needs a single instant across several ordinary files.
 Files that vanish during staging are omitted and produce a warning without
 failing the backup.
 
-## Quick start
+## SQLite quick start
 
 Mount application data read-only under `/source`. Each line in
 `SQLITE_DATABASES` must be an absolute database path below `/source`.
@@ -36,7 +38,7 @@ Mount application data read-only under `/source`. Each line in
 ```yaml
 services:
   backup:
-    image: ghcr.io/housewatch-digital/backup-sidecar:0.1.1
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.2.0
     command: ["daemon"]
     environment:
       BACKUP_NAME: example-production
@@ -55,9 +57,14 @@ services:
 ```
 
 For a platform scheduler, use `command: ["idle"]` and schedule
-`sqlite-backup run`. See the [Docker Compose](docs/platforms/docker-compose.md),
+`backup-sidecar run`. See the [Docker Compose](docs/platforms/docker-compose.md),
 [Coolify](docs/platforms/coolify.md), and
 [Kubernetes](docs/platforms/kubernetes.md) guides.
+
+For PostgreSQL 16, use
+`ghcr.io/housewatch-digital/backup-sidecar:0.2.0-postgres16` and follow the
+[PostgreSQL guide](docs/engines/postgresql.md). Versioned tags are recommended in
+production; the moving `postgres16` tag is also published.
 
 ## Required settings
 
@@ -120,7 +127,8 @@ Each `run` command:
 2. Runs executable pre-backup hooks in lexical order.
 3. Creates and verifies each SQLite snapshot.
 4. Copies ordinary files into a private staging directory.
-5. Adds restore metadata under `.sqlite-backup`.
+5. Adds restore metadata under `.sqlite-backup` and, when applicable,
+   `.backup-sidecar`.
 6. Uploads the staged data to Restic.
 7. Applies snapshot retention without pruning.
 8. Runs executable post-backup hooks.
@@ -132,28 +140,29 @@ A failed run records its status and invokes failure hooks. See
 ## Commands
 
 ```text
-sqlite-backup run
-sqlite-backup idle
-sqlite-backup daemon
-sqlite-backup doctor
-sqlite-backup snapshots
-sqlite-backup check
-sqlite-backup prune
-sqlite-backup restore-latest /restore/rehearsal
-sqlite-backup verify /restore/rehearsal
-sqlite-backup health
-sqlite-backup status
+backup-sidecar run
+backup-sidecar idle
+backup-sidecar daemon
+backup-sidecar doctor
+backup-sidecar snapshots
+backup-sidecar check
+backup-sidecar prune
+backup-sidecar restore-latest /restore/rehearsal
+backup-sidecar verify /restore/rehearsal
+backup-sidecar health
+backup-sidecar status
 ```
 
-Run `sqlite-backup doctor` before the first backup. It validates the mounts,
-configured SQLite paths, database health, tools, and Restic access without
-creating a backup or initializing a repository.
+The existing `sqlite-backup` executable remains as a compatibility alias. Run
+`backup-sidecar doctor` before the first backup. It validates the mounts,
+configured databases, tools, and Restic access without creating a backup or
+initializing a repository.
 
 ## Retention and health
 
 The defaults retain 30 daily, 8 weekly, and 12 monthly snapshots. A normal backup
 runs `restic forget` but does not reclaim repository data. Run
-`sqlite-backup prune` weekly and `sqlite-backup check` monthly.
+`backup-sidecar prune` weekly and `backup-sidecar check` monthly.
 
 The health check allows 93,600 seconds, or 26 hours, between successful backups.
 Set `BACKUP_MAX_AGE_SECONDS` to match the schedule and alerting tolerance.
@@ -171,6 +180,7 @@ make test
 make image
 ```
 
-The test suite exercises live WAL-mode writes, multiple databases, file-only
-backups, hooks, restore verification, compatibility behavior, and a real local
-Restic repository when Restic is installed.
+The test suite exercises live SQLite WAL-mode writes, multiple databases,
+PostgreSQL custom-format dumps, PostgreSQL extensions, file-only backups, hooks,
+restore verification, compatibility behavior, and a real local Restic repository
+when Restic is installed.

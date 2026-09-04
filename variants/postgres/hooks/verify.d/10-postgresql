@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+: "${POSTGRES_HELPER_FILE:=/usr/local/lib/backup-sidecar/postgresql.sh}"
+. "$POSTGRES_HELPER_FILE"
+
+: "${BACKUP_RESTORE_DIR:?BACKUP_RESTORE_DIR is required}"
+
+metadata_dir="$BACKUP_RESTORE_DIR/.backup-sidecar/postgresql"
+manifest="$metadata_dir/databases.jsonl"
+[ -e "$metadata_dir" ] || exit 0
+[ -f "$manifest" ] || postgres_die "restored PostgreSQL manifest is missing"
+
+postgres_require_command jq
+postgres_require_command pg_restore
+
+database_count=0
+while IFS= read -r record || [ -n "$record" ]; do
+  [ -n "$record" ] || continue
+  if ! database="$(printf '%s\n' "$record" | jq -er 'select(.database | type == "string") | .database')"; then
+    postgres_die "restored PostgreSQL manifest contains an invalid database name"
+  fi
+  if ! relative_path="$(printf '%s\n' "$record" | jq -er 'select(.path | type == "string") | .path')"; then
+    postgres_die "restored PostgreSQL manifest contains an invalid dump path"
+  fi
+  case "$relative_path" in
+    .backup-sidecar/postgresql/*.dump) ;;
+    *) postgres_die "unsafe PostgreSQL dump path in restore metadata: $relative_path" ;;
+  esac
+
+  archive="$BACKUP_RESTORE_DIR/$relative_path"
+  [ -f "$archive" ] || postgres_die "restored PostgreSQL dump is missing: $relative_path"
+  pg_restore --list "$archive" >/dev/null
+  database_count="$((database_count + 1))"
+  postgres_log "verified restored dump: database=$database path=$relative_path"
+done < "$manifest"
+
+[ "$database_count" -gt 0 ] || postgres_die "restored PostgreSQL manifest is empty"
+postgres_log "restore verification completed: databases=$database_count"
