@@ -41,7 +41,7 @@ class PostgresHookTest(unittest.TestCase):
             textwrap.dedent(
                 """\
                 if [ "${1:-}" = "--version" ]; then
-                  printf '%s\n' 'pg_dump (PostgreSQL) 16.11'
+                  printf '%s\n' 'pg_dump (PostgreSQL) 18.6'
                   exit 0
                 fi
                 [ "${FAKE_PG_DUMP_FAIL:-false}" != true ] || exit 9
@@ -84,8 +84,8 @@ class PostgresHookTest(unittest.TestCase):
                 done
                 printf 'psql:%s\n' "$database" >> "$FAKE_COMMAND_LOG"
                 case "$command" in
-                  'SHOW server_version_num;') printf '%s\n' "${FAKE_SERVER_VERSION_NUM:-160011}" ;;
-                  'SHOW server_version;') printf '%s\n' "${FAKE_SERVER_VERSION:-16.11}" ;;
+                  'SHOW server_version_num;') printf '%s\n' "${FAKE_SERVER_VERSION_NUM:-180006}" ;;
+                  'SHOW server_version;') printf '%s\n' "${FAKE_SERVER_VERSION:-18.6}" ;;
                   *) exit 8 ;;
                 esac
                 """
@@ -164,7 +164,7 @@ class PostgresHookTest(unittest.TestCase):
             environment=self._environment(FAKE_SERVER_VERSION_NUM="170001", FAKE_SERVER_VERSION="17.1"),
         )
         self.assertNotEqual(0, mismatch.returncode)
-        self.assertIn("uses PostgreSQL 17 but pg_dump is PostgreSQL 16", mismatch.stderr)
+        self.assertIn("uses PostgreSQL 17 but pg_dump is PostgreSQL 18", mismatch.stderr)
 
         allowed = self._run(
             DOCTOR_HOOK,

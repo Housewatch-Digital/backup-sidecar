@@ -14,7 +14,7 @@ backup-sidecar restore-latest /restore/rehearsal
 
 The restore command chooses the latest snapshot with the current tag, then runs
 the checks supplied by the image. The base image runs SQLite `PRAGMA quick_check`;
-the PostgreSQL 16 image also validates every logical dump with
+the PostgreSQL 18 image also validates every logical dump with
 `pg_restore --list`.
 
 ## Inspect the result
@@ -37,7 +37,7 @@ backup-sidecar verify /restore/rehearsal
 ## Rehearse a PostgreSQL restore
 
 The sidecar deliberately does not overwrite a live database. Start a disposable
-PostgreSQL 16 server with the same required extension packages as production,
+PostgreSQL 18 server with the same required extension packages as production,
 create an empty target database, then restore each archive listed in
 `databases.jsonl`.
 

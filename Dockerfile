@@ -1,6 +1,6 @@
 FROM alpine:3.24 AS base
 
-ARG VERSION=0.2.0
+ARG VERSION=0.3.0
 
 LABEL org.opencontainers.image.title="Backup Sidecar" \
       org.opencontainers.image.description="Engine-aware database and file-volume backups to Restic repositories" \
@@ -50,7 +50,7 @@ CMD ["idle"]
 
 FROM base AS postgres
 
-ARG POSTGRES_MAJOR=16
+ARG POSTGRES_MAJOR=18
 
 RUN apk add --no-cache "postgresql${POSTGRES_MAJOR}-client"
 

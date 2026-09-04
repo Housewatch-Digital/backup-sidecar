@@ -17,14 +17,14 @@ jobs:
       matrix:
         include:
           - target: default
-            postgres_major: "16"
+            postgres_major: "18"
             suffix: ""
             moving_tag: latest
             publish_moving_tag: false
           - target: postgres
-            postgres_major: "16"
-            suffix: "-postgres16"
-            moving_tag: postgres16
+            postgres_major: "18"
+            suffix: "-postgres18"
+            moving_tag: postgres18
             publish_moving_tag: true
     steps:
       - uses: actions/checkout@v4

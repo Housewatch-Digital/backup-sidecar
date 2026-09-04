@@ -224,7 +224,7 @@ class BackupSidecarTest(unittest.TestCase):
 
     def test_version(self) -> None:
         result = self._run("version")
-        self.assertEqual("0.2.0\n", result.stdout)
+        self.assertEqual("0.3.0\n", result.stdout)
 
     def test_live_wal_backup_and_restore(self) -> None:
         stop = threading.Event()

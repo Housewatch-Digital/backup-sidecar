@@ -3,8 +3,8 @@
 Use the sidecar as another service in the application's Docker Compose stack.
 Start with [`examples/compose.coolify.yaml`](../../examples/compose.coolify.yaml)
 for SQLite/files or
-[`examples/compose.coolify-postgres16.yaml`](../../examples/compose.coolify-postgres16.yaml)
-for PostgreSQL 16, then replace the example application and database settings.
+[`examples/compose.coolify-postgres18.yaml`](../../examples/compose.coolify-postgres18.yaml)
+for PostgreSQL 18, then replace the example application and database settings.
 
 ## Mount the source data
 
@@ -52,9 +52,9 @@ mount is read-only. Run `backup-sidecar doctor` while the application is running
 If a cleanly closed WAL database has removed those files, see the read-only WAL
 note in the main README before scheduling backups.
 
-## Configure PostgreSQL 16
+## Configure PostgreSQL 18
 
-Use the image tag ending in `-postgres16`, set `PGHOST` to the PostgreSQL Compose
+Use the image tag ending in `-postgres18`, set `PGHOST` to the PostgreSQL Compose
 service name, and set `POSTGRES_DATABASES` to the database names to dump. The
 sidecar connects across the internal Compose network; do not publish PostgreSQL's
 port for the backup container.
@@ -110,7 +110,7 @@ the application requires a single point-in-time filesystem image.
 4. Run `backup-sidecar snapshots`.
 5. Restore into an empty path below `/restore`.
 6. Inspect the result and run `backup-sidecar verify`.
-7. For PostgreSQL, apply the dump to a disposable PostgreSQL 16 server and run
+7. For PostgreSQL, apply the dump to a disposable PostgreSQL 18 server and run
    application-level checks.
 
 The container health check remains unhealthy until the first successful backup.

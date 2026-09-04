@@ -1,13 +1,18 @@
 # PostgreSQL backups
 
-Use the `postgres16` image for PostgreSQL 16 databases:
+Use the `postgres18` image for PostgreSQL 18 databases:
 
 ```text
-ghcr.io/housewatch-digital/backup-sidecar:0.2.0-postgres16
+ghcr.io/housewatch-digital/backup-sidecar:0.3.0-postgres18
 ```
 
-The moving `postgres16` tag is convenient for testing, but a versioned tag makes
+The moving `postgres18` tag is convenient for testing, but a versioned tag makes
 production upgrades deliberate. The base image remains SQLite- and file-focused.
+
+PostgreSQL 18 images store the cluster under `/var/lib/postgresql/18/docker` and
+expect persistent volumes to mount at `/var/lib/postgresql`. Do not reuse a data
+volume created by an earlier PostgreSQL major version without completing a
+supported major-version upgrade first.
 
 ## What the variant does
 
@@ -46,7 +51,7 @@ Use standard libpq variables for the connection:
 | `PGPASSFILE` | Readable password file; preferable when secret files are available |
 | `PGSSLMODE` and related `PGSSL*` variables | Optional TLS behavior |
 | `PGCONNECT_TIMEOUT` | Connection timeout; defaults to 10 seconds |
-| `POSTGRES_REQUIRE_MATCHING_MAJOR` | Require PostgreSQL 16 servers; defaults to `true` |
+| `POSTGRES_REQUIRE_MATCHING_MAJOR` | Require PostgreSQL 18 servers; defaults to `true` |
 
 Create a least-privilege login role that can connect to every selected database
 and read every object that must be recoverable. PostgreSQL permissions vary by
@@ -84,7 +89,7 @@ backup-sidecar verify /restore/rehearsal
 
 `restore-latest` verifies the structure of every restored dump. It does not apply
 dumps to a database. Complete a restore rehearsal against a disposable PostgreSQL
-16 server by following the [restore runbook](../restore-runbook.md).
+18 server by following the [restore runbook](../restore-runbook.md).
 
-See the [Docker Compose example](../../examples/compose.postgres16.yaml) and the
-[Coolify example](../../examples/compose.coolify-postgres16.yaml).
+See the [Docker Compose example](../../examples/compose.postgres18.yaml) and the
+[Coolify example](../../examples/compose.coolify-postgres18.yaml).

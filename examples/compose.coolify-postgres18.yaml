@@ -1,13 +1,13 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgres:18
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?Set the application database}
       POSTGRES_USER: ${POSTGRES_USER:?Set the application database user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set the application database password}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
@@ -15,7 +15,7 @@ services:
       retries: 10
 
   backup:
-    image: ghcr.io/housewatch-digital/backup-sidecar:0.2.0-postgres16
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.3.0-postgres18
     restart: unless-stopped
     init: true
     read_only: true

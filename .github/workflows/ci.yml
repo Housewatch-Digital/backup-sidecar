@@ -38,9 +38,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - major: "16"
+          - major: "18"
             image_target: postgres
-            image_tag: sqlite-backup-sidecar:postgres16-dev
+            image_tag: sqlite-backup-sidecar:postgres18-dev
     steps:
       - uses: actions/checkout@v4
       - name: Build PostgreSQL ${{ matrix.major }} image

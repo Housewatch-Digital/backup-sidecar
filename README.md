@@ -3,8 +3,8 @@
 Backup Sidecar creates engine-aware database backups without copying live database
 storage. The base image uses SQLite's online backup API, verifies each copy,
 stages ordinary files mounted beside the databases, and sends the completed
-snapshot to an encrypted Restic repository. The `postgres16` image adds verified
-PostgreSQL 16 logical dumps through `pg_dump`.
+snapshot to an encrypted Restic repository. The `postgres18` image adds verified
+PostgreSQL 18 logical dumps through `pg_dump`.
 
 The container works with Docker Compose, Coolify, Kubernetes, and other container
 platforms. Restic supports local storage, SFTP, REST servers, S3-compatible
@@ -13,7 +13,7 @@ storage, Backblaze B2, Azure Blob Storage, and Google Cloud Storage.
 ## What it protects
 
 - One or more explicitly configured SQLite databases in the base image
-- One or more PostgreSQL 16 databases in the `postgres16` image
+- One or more PostgreSQL 18 databases in the `postgres18` image
 - Ordinary files from one or more volumes mounted below `/source`
 - Encrypted, deduplicated Restic snapshots
 - Restores verified with SQLite `PRAGMA quick_check` and/or `pg_restore --list`
@@ -38,7 +38,7 @@ Mount application data read-only under `/source`. Each line in
 ```yaml
 services:
   backup:
-    image: ghcr.io/housewatch-digital/backup-sidecar:0.2.0
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.3.0
     command: ["daemon"]
     environment:
       BACKUP_NAME: example-production
@@ -61,10 +61,10 @@ For a platform scheduler, use `command: ["idle"]` and schedule
 [Coolify](docs/platforms/coolify.md), and
 [Kubernetes](docs/platforms/kubernetes.md) guides.
 
-For PostgreSQL 16, use
-`ghcr.io/housewatch-digital/backup-sidecar:0.2.0-postgres16` and follow the
+For PostgreSQL 18, use
+`ghcr.io/housewatch-digital/backup-sidecar:0.3.0-postgres18` and follow the
 [PostgreSQL guide](docs/engines/postgresql.md). Versioned tags are recommended in
-production; the moving `postgres16` tag is also published.
+production; the moving `postgres18` tag is also published.
 
 ## Required settings
 

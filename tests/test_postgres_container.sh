@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-backup_image="${BACKUP_POSTGRES_TEST_IMAGE:-sqlite-backup-sidecar:postgres16-dev}"
-postgres_image="${POSTGRES_TEST_IMAGE:-pgvector/pgvector:pg16}"
+backup_image="${BACKUP_POSTGRES_TEST_IMAGE:-sqlite-backup-sidecar:postgres18-dev}"
+postgres_image="${POSTGRES_TEST_IMAGE:-pgvector/pgvector:pg18}"
 test_root="$(mktemp -d /tmp/backup-sidecar-postgres.XXXXXX)"
 network="backup-sidecar-postgres-$$"
 source_container="backup-sidecar-postgres-source-$$"

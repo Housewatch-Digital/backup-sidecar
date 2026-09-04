@@ -8,7 +8,7 @@ mode when a host scheduler or container platform will run `backup-sidecar run`.
 ```yaml
 services:
   backup:
-    image: ghcr.io/housewatch-digital/backup-sidecar:0.2.0
+    image: ghcr.io/housewatch-digital/backup-sidecar:0.3.0
     command: ["daemon"]
     restart: unless-stopped
     init: true

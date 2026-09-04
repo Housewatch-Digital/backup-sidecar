@@ -42,7 +42,7 @@ staging so a mounted volume cannot overwrite hook output.
 
 A pre-backup hook can run `pg_dump` or `mysqldump` and write the output directly
 under `BACKUP_PAYLOAD_DIR`. The required database client must exist in the image.
-The published `postgres16` variant includes maintained PostgreSQL hooks; use a
+The published `postgres18` variant includes maintained PostgreSQL hooks; use a
 derived image for other engines.
 
 Example PostgreSQL hook:
